@@ -8,31 +8,34 @@ std::vector<std::pair<size_t, float>> get_pruned_log_probs(
     const std::vector<double> &prob_step,
     double cutoff_prob,
     size_t cutoff_top_n) {
-  std::vector<std::pair<int, double>> prob_idx;
-  for (size_t i = 0; i < prob_step.size(); ++i) {
-    prob_idx.push_back(std::pair<int, double>(i, prob_step[i]));
-  }
+
+
+  std::vector<int> indices(prob_step.size());
+  std::iota(indices.begin(), indices.end(), 0);
+
   // pruning of vacobulary
   size_t cutoff_len = prob_step.size();
   if (cutoff_prob < 1.0 || cutoff_top_n < cutoff_len) {
-    std::sort(
-        prob_idx.begin(), prob_idx.end(), pair_comp_second_rev<int, double>);
+    //std::sort(prob_idx.begin(), prob_idx.end(), pair_comp_second_rev<int, double>);
+    std::sort(indices.begin(), indices.end(),
+              [&prob_step](size_t i1, size_t i2) {return prob_step[i1] < prob_step[i2];});
+
     if (cutoff_prob < 1.0) {
       double cum_prob = 0.0;
       cutoff_len = 0;
-      for (size_t i = 0; i < prob_idx.size(); ++i) {
-        cum_prob += prob_idx[i].second;
+      for (size_t i = 0; i < prob_step.size(); ++i) {
+        cum_prob += prob_step[indices[i]];
         cutoff_len += 1;
         if (cum_prob >= cutoff_prob || cutoff_len >= cutoff_top_n) break;
       }
     }
-    prob_idx = std::vector<std::pair<int, double>>(
-        prob_idx.begin(), prob_idx.begin() + cutoff_len);
+
+    if (cutoff_len < prob_step.size())
+      indices.resize(cutoff_len);
   }
   std::vector<std::pair<size_t, float>> log_prob_idx;
   for (size_t i = 0; i < cutoff_len; ++i) {
-    log_prob_idx.push_back(std::pair<int, float>(
-        prob_idx[i].first, log(prob_idx[i].second + NUM_FLT_MIN)));
+    log_prob_idx.emplace_back(std::pair<int, float>(indices[i], log(prob_step[indices[i]] + NUM_FLT_MIN)));
   }
   return log_prob_idx;
 }

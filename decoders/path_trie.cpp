@@ -5,7 +5,11 @@
 #include <memory>
 #include <utility>
 #include <vector>
+#include <oneapi/tbb/parallel_for.h>
+#include <oneapi/tbb/blocked_range.h>
+#include <oneapi/tbb/concurrent_vector.h>
 
+#include <iostream>
 #include "decoder_utils.h"
 
 PathTrie::PathTrie() {
@@ -123,6 +127,77 @@ void PathTrie::iterate_to_vec(std::vector<PathTrie*>& output) {
   for (auto child : children_) {
     child.second->iterate_to_vec(output);
   }
+}
+
+// same as iterate_to_vec but without recursion
+void PathTrie::iterate_to_vec_no_rec(std::vector<PathTrie*>& output) {
+  std::deque<PathTrie*> deque;
+  deque.push_back(this);
+  if ( this->process_element() ) {
+    output.push_back(this);
+  }
+
+  while(!deque.empty()) {
+    PathTrie* element = deque.front();
+    deque.pop_front();
+    std::vector<std::pair<int, PathTrie*>> children;
+    element->get_children(children);
+
+    for (auto child : children) {
+      if ( child.second->process_element() ) {
+        output.push_back(child.second);
+      }
+      std::vector<std::pair<int, PathTrie*>> grandchildren;
+      child.second->get_children(grandchildren);
+      for (auto grandchild : grandchildren) {
+        deque.push_back(grandchild.second);
+      }
+    }
+  }
+
+}
+
+bool PathTrie::process_element() {
+  if (exists_) {
+    log_prob_b_prev = log_prob_b_cur;
+    log_prob_nb_prev = log_prob_nb_cur;
+
+    log_prob_b_cur = -NUM_FLT_INF;
+    log_prob_nb_cur = -NUM_FLT_INF;
+
+    score = log_sum_exp(log_prob_b_prev, log_prob_nb_prev);
+    return true;
+  } else {
+    return false;
+  }
+}
+
+// starts parallel update for all children of the root (current node)
+void PathTrie::iterate_to_vec_from_root(std::vector<PathTrie*>& output) {
+  if ( this->process_element() ) {
+    output.push_back(this);
+  }
+  std::vector<std::pair<int, PathTrie*>> children;
+  this->get_children(children);
+
+  oneapi::tbb::concurrent_vector<std::vector<PathTrie*>> concurr_output;
+  concurr_output.reserve(children.size());
+
+
+  oneapi::tbb::parallel_for(
+          oneapi::tbb::blocked_range<size_t>(0, children.size()),
+          [&](const oneapi::tbb::blocked_range<size_t> &r) {
+              std::vector<PathTrie*> local_output;
+              for (size_t i = r.begin(); i != r.end(); ++i) {
+                  children[i].second->iterate_to_vec_no_rec(local_output);
+              }
+              concurr_output.push_back(std::move(local_output));
+          });
+
+  for (auto& vec : concurr_output) {
+    output.insert(output.end(), vec.begin(), vec.end());
+  }
+
 }
 
 void PathTrie::remove() {

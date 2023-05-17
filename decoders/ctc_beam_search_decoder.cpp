@@ -6,7 +6,9 @@
 #include <limits>
 #include <map>
 #include <utility>
-
+#include <oneapi/tbb/parallel_for.h>
+#include <oneapi/tbb/blocked_range.h>
+#include <oneapi/tbb/concurrent_vector.h>
 #include "ThreadPool.h"
 #include "fst/fstlib.h"
 
@@ -65,77 +67,76 @@ std::vector<std::pair<double, std::string>> ctc_beam_search_decoder(
     bool full_beam = false;
     if (ext_scorer != nullptr) {
       size_t num_prefixes = std::min(prefixes.size(), beam_size);
-      std::sort(
-          prefixes.begin(), prefixes.begin() + num_prefixes, prefix_compare);
-      min_cutoff = prefixes[num_prefixes - 1]->score +
-                   std::log(prob[blank_id]) - std::max(0.0, ext_scorer->beta);
+      std::sort(prefixes.begin(), prefixes.begin() + num_prefixes, prefix_compare);
+
+      min_cutoff = prefixes[num_prefixes - 1]->score + std::log(prob[blank_id]) - std::max(0.0, ext_scorer->beta);
       full_beam = (num_prefixes == beam_size);
     }
 
-    std::vector<std::pair<size_t, float>> log_prob_idx =
-        get_pruned_log_probs(prob, cutoff_prob, cutoff_top_n);
+    auto log_prob_idx = get_pruned_log_probs(prob, cutoff_prob, cutoff_top_n);
+
+    //std::cout << time_step << std::endl;
     // loop over chars
     for (size_t index = 0; index < log_prob_idx.size(); index++) {
       auto c = log_prob_idx[index].first;
       auto log_prob_c = log_prob_idx[index].second;
 
-      for (size_t i = 0; i < prefixes.size() && i < beam_size; ++i) {
-        auto prefix = prefixes[i];
-        if (full_beam && log_prob_c + prefix->score < min_cutoff) {
-          break;
-        }
-        // blank
-        if (c == blank_id) {
-          prefix->log_prob_b_cur =
-              log_sum_exp(prefix->log_prob_b_cur, log_prob_c + prefix->score);
-          continue;
-        }
-        // repeated character
-        if (c == prefix->character) {
-          prefix->log_prob_nb_cur = log_sum_exp(
-              prefix->log_prob_nb_cur, log_prob_c + prefix->log_prob_nb_prev);
-        }
-        // get new prefix
-        auto prefix_new = prefix->get_path_trie(c);
-
-        if (prefix_new != nullptr) {
-          float log_p = -NUM_FLT_INF;
-
-          if (c == prefix->character &&
-              prefix->log_prob_b_prev > -NUM_FLT_INF) {
-            log_p = log_prob_c + prefix->log_prob_b_prev;
-          } else if (c != prefix->character) {
-            log_p = log_prob_c + prefix->score;
+      //tbb:parallel_for(tbb::blocked_range<size_t>(0, prefixes.size()),[&](const tbb::blocked_range<size_t> &r) {
+        //for (size_t i = r.begin(); i != r.end() && i < beam_size; ++i) {
+        for(size_t i = 0; i < prefixes.size() && i < beam_size; ++i) {
+          auto prefix = prefixes[i];
+          if (full_beam && log_prob_c + prefix->score < min_cutoff) {
+            break;
           }
+          // blank
+          if (c == blank_id) {
+            prefix->log_prob_b_cur = log_sum_exp(prefix->log_prob_b_cur, log_prob_c + prefix->score);
+            continue;
+          }
+          // repeated character
+          if (c == prefix->character) {
+            prefix->log_prob_nb_cur = log_sum_exp(prefix->log_prob_nb_cur, log_prob_c + prefix->log_prob_nb_prev);
+          }
+          // get new prefix
+          auto prefix_new = prefix->get_path_trie(c);
 
-          // language model scoring
-          if (ext_scorer != nullptr &&
-              (c == space_id || ext_scorer->is_character_based())) {
-            PathTrie *prefix_to_score = nullptr;
-            // skip scoring the space
-            if (ext_scorer->is_character_based()) {
-              prefix_to_score = prefix_new;
-            } else {
-              prefix_to_score = prefix;
+          if (prefix_new != nullptr) {
+            float log_p = -NUM_FLT_INF;
+
+            if (c == prefix->character && prefix->log_prob_b_prev > -NUM_FLT_INF) {
+              log_p = log_prob_c + prefix->log_prob_b_prev;
+            } else if (c != prefix->character) {
+              log_p = log_prob_c + prefix->score;
             }
 
-            float score = 0.0;
-            std::vector<std::string> ngram;
-            ngram = ext_scorer->make_ngram(prefix_to_score);
-            score = ext_scorer->get_log_cond_prob(ngram) * ext_scorer->alpha;
-            log_p += score;
-            log_p += ext_scorer->beta;
-          }
-          prefix_new->log_prob_nb_cur =
-              log_sum_exp(prefix_new->log_prob_nb_cur, log_p);
-        }
-      }  // end of loop over prefix
-    }    // end of loop over vocabulary
+            // language model scoring
+            if (ext_scorer != nullptr && (c == space_id || ext_scorer->is_character_based())) {
+              PathTrie *prefix_to_score = nullptr;
+              // skip scoring the space
+              if (ext_scorer->is_character_based()) {
+                prefix_to_score = prefix_new;
+              } else {
+                prefix_to_score = prefix;
+              }
 
+              float score = 0.0;
+              std::vector<std::string> ngram;
+              ngram = ext_scorer->make_ngram(prefix_to_score);
+              score = ext_scorer->get_log_cond_prob(ngram) * ext_scorer->alpha;
+              log_p += score;
+              log_p += ext_scorer->beta;
+            }
+            prefix_new->log_prob_nb_cur = log_sum_exp(prefix_new->log_prob_nb_cur, log_p);
+          }
+        }  // end of loop over prefix
+
+    }    // end of loop over vocabulary
 
     prefixes.clear();
     // update log probs
-    root.iterate_to_vec(prefixes);
+    //root.iterate_to_vec_no_rec(prefixes);
+
+    root.iterate_to_vec_from_root(prefixes);
 
     // only preserve top beam_size prefixes
     if (prefixes.size() >= beam_size) {
@@ -322,13 +323,12 @@ std::vector<std::pair<double, std::string>> BeamDecoder::decode(const std::vecto
       size_t num_prefixes = std::min(prefixes.size(), beam_size);
       std::sort(
           prefixes.begin(), prefixes.begin() + num_prefixes, prefix_compare);
-      min_cutoff = prefixes[num_prefixes - 1]->score +
-                   std::log(prob[blank_id]) - std::max(0.0, ext_scorer->beta);
+      min_cutoff = prefixes[num_prefixes - 1]->score + std::log(prob[blank_id]) - std::max(0.0, ext_scorer->beta);
       full_beam = (num_prefixes == beam_size);
     }
 
-    std::vector<std::pair<size_t, float>> log_prob_idx =
-        get_pruned_log_probs(prob, cutoff_prob, cutoff_top_n);
+    std::vector<std::pair<size_t, float>> log_prob_idx = get_pruned_log_probs(prob, cutoff_prob, cutoff_top_n);
+    std::cout <<  log_prob_idx.size() << std::endl;
     // loop over chars
     for (size_t index = 0; index < log_prob_idx.size(); index++) {
       auto c = log_prob_idx[index].first;
@@ -341,14 +341,12 @@ std::vector<std::pair<double, std::string>> BeamDecoder::decode(const std::vecto
         }
         // blank
         if (c == blank_id) {
-          prefix->log_prob_b_cur =
-              log_sum_exp(prefix->log_prob_b_cur, log_prob_c + prefix->score);
+          prefix->log_prob_b_cur = log_sum_exp(prefix->log_prob_b_cur, log_prob_c + prefix->score);
           continue;
         }
         // repeated character
         if (c == prefix->character) {
-          prefix->log_prob_nb_cur = log_sum_exp(
-              prefix->log_prob_nb_cur, log_prob_c + prefix->log_prob_nb_prev);
+          prefix->log_prob_nb_cur = log_sum_exp(prefix->log_prob_nb_cur, log_prob_c + prefix->log_prob_nb_prev);
         }
         // get new prefix
         auto prefix_new = prefix->get_path_trie(c);

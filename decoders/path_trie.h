@@ -31,10 +31,13 @@ public:
 
   // update log probs
   void iterate_to_vec(std::vector<PathTrie*>& output);
+  void iterate_to_vec_no_rec(std::vector<PathTrie*>& output);
+  void iterate_to_vec_from_root(std::vector<PathTrie*>& output);
+  bool process_element();
 
   // set dictionary for FST
   void set_dictionary(fst::StdVectorFst* dictionary);
-
+  void get_children(std::vector<std::pair<int, PathTrie*>> children) { children = children_; };
   void set_matcher(std::shared_ptr<fst::SortedMatcher<fst::StdVectorFst>>);
 
   bool is_empty() { return ROOT_ == character; }
