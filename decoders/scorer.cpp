@@ -8,15 +8,20 @@
 #include "lm/state.hh"
 #include "util/string_piece.hh"
 #include "util/tokenize_piece.hh"
-
+#include <oneapi/tbb/parallel_for.h>
+#include <oneapi/tbb/blocked_range.h>
+#include <oneapi/tbb/concurrent_vector.h>
+#include <chrono>
 #include "decoder_utils.h"
+#include <mutex>
 
 using namespace lm::ngram;
 
 Scorer::Scorer(double alpha,
                double beta,
                const std::string& lm_path,
-               const std::vector<std::string>& vocab_list) {
+               const std::vector<std::string>& vocab_list,
+               const std::string &voc_file_path) {
   this->alpha = alpha;
   this->beta = beta;
 
@@ -28,7 +33,7 @@ Scorer::Scorer(double alpha,
   dict_size_ = 0;
   SPACE_ID_ = -1;
 
-  setup(lm_path, vocab_list);
+  setup(lm_path, vocab_list, voc_file_path);
 }
 
 Scorer::~Scorer() {
@@ -41,14 +46,15 @@ Scorer::~Scorer() {
 }
 
 void Scorer::setup(const std::string& lm_path,
-                   const std::vector<std::string>& vocab_list) {
+                   const std::vector<std::string>& vocab_list, const std::string &voc_file_path) {
+  //if (!voc_file_path.empty()) {}
   // load language model
   load_lm(lm_path);
   // set char map for scorer
   set_char_map(vocab_list);
   // fill the dictionary for FST
   if (!is_character_based()) {
-    fill_dictionary(true);
+    fill_dictionary_parallel(true);
   }
 }
 
@@ -227,4 +233,89 @@ void Scorer::fill_dictionary(bool add_space) {
    */
   fst::Minimize(new_dict);
   this->dictionary = new_dict;
+}
+
+void Scorer::fill_dictionary_parallel(bool add_space) {
+    const int num_threads = 10;
+    const int chunks = num_threads;
+    auto start_time = std::chrono::high_resolution_clock::now();
+    std::cout << "fill_dictionary" << std::endl;
+
+    oneapi::tbb::concurrent_vector<fst::StdVectorFst> dictionary_list;
+    std::vector<std::vector<std::string>> vocabularies(chunks);
+
+    // split vocabulary into num_threads parts
+    int part_size = vocabulary_.size() / chunks;
+    for (int i = 0; i < chunks; i++) {
+        int start = i * part_size;
+        int end = (i + 1) * part_size;
+        if (i == num_threads - 1)
+            end = vocabulary_.size();
+
+        vocabularies[i] = std::vector<std::string>(vocabulary_.begin() + start, vocabulary_.begin() + end);
+    }
+    std::mutex mutex;
+    auto start_chunks = std::chrono::high_resolution_clock::now();
+    oneapi::tbb::parallel_for(
+                            oneapi::tbb::blocked_range<size_t>(0, chunks),
+                      [&](const oneapi::tbb::blocked_range<size_t> &r) {
+                          for (size_t i = r.begin(); i != r.end(); ++i) {
+                            fst::StdVectorFst dct;
+                            for (const auto &word: vocabularies[i]) {
+                              add_word_to_dictionary(word, char_map_, add_space, SPACE_ID_ + 1, &dct);
+                            }
+                            fst::RmEpsilon(&dct);
+                            fst::Determinize(dct, &dct);
+                            fst::Minimize(&dct);
+                            dictionary_list.push_back(dct);
+                          }
+                      });
+
+
+    //std::cout << "init size: " << dictionary_list_init.size() << std::endl;
+    std::cout << "list size: " << dictionary_list.size() << std::endl;
+    auto current = std::chrono::high_resolution_clock::now();
+    std::cout << "Union: " << std::chrono::duration_cast<std::chrono::seconds>(current - start_time).count()  << std::endl;
+    // Merge the FSTs into a single FST
+    fst::StdVectorFst final_fst;
+    for (size_t i = 0; i < dictionary_list.size(); ++i) {
+        if (i == 0) {
+            final_fst = dictionary_list[i];
+        } else {
+            fst::Union(&final_fst, dictionary_list[i]);
+        }
+    }
+
+    dict_size_ = final_fst.NumStates();
+    current = std::chrono::high_resolution_clock::now();
+    std::cout << "RmEpsilon: " << std::chrono::duration_cast<std::chrono::seconds>(current - start_time).count()  << std::endl;
+    /* Simplify FST
+
+     * This gets rid of "epsilon" transitions in the FST.
+     * These are transitions that don't require a string input to be taken.
+     * Getting rid of them is necessary to make the FST determinisitc, but
+     * can greatly increase the size of the FST
+     */
+    fst::RmEpsilon(&final_fst);
+    fst::StdVectorFst* new_dict = new fst::StdVectorFst;
+
+    /* This makes the FST deterministic, meaning for any string input there's
+     * only one possible state the FST could be in.  It is assumed our
+     * dictionary is deterministic when using it.
+     * (lest we'd have to check for multiple transitions at each state)
+     */
+    current = std::chrono::high_resolution_clock::now();
+    std::cout << "Determinize: " << std::chrono::duration_cast<std::chrono::seconds>(current - start_time).count()  << std::endl;
+
+    fst::Determinize(final_fst, new_dict);
+
+    /* Finds the simplest equivalent fst. This is unnecessary but decreases
+     * memory usage of the dictionary
+     */
+    current = std::chrono::high_resolution_clock::now();
+    std::cout << "Minimize: " << std::chrono::duration_cast<std::chrono::seconds>(current - start_time).count()  << std::endl;
+    fst::Minimize(new_dict);
+    this->dictionary = new_dict;
+    current = std::chrono::high_resolution_clock::now();
+    std::cout << "done: " << std::chrono::duration_cast<std::chrono::seconds>(current - start_time).count()  << std::endl;
 }

@@ -3,6 +3,10 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
+import setuptools
+import distutils
+from distutils import ccompiler
+
 from setuptools import setup, Extension, distutils
 import glob
 import platform
@@ -76,7 +80,7 @@ FILES = [
         'unittest.cc'))
 ]
 
-LIBS = ['stdc++']
+LIBS = ['stdc++', 'tbb']
 if platform.system() != 'Darwin':
     LIBS.append('rt')
 

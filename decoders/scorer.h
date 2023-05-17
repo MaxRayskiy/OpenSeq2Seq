@@ -43,7 +43,9 @@ public:
   Scorer(double alpha,
          double beta,
          const std::string &lm_path,
-         const std::vector<std::string> &vocabulary);
+         const std::vector<std::string> &vocabulary,
+         const std::string &voc_file_path = "");
+
   ~Scorer();
 
   double get_log_cond_prob(const std::vector<std::string> &words);
@@ -80,13 +82,16 @@ public:
 protected:
   // necessary setup: load language model, set char map, fill FST's dictionary
   void setup(const std::string &lm_path,
-             const std::vector<std::string> &vocab_list);
+             const std::vector<std::string> &vocab_list,
+             const std::string &voc_file_path = "");
 
   // load language model from given path
   void load_lm(const std::string &lm_path);
 
   // fill dictionary for FST
   void fill_dictionary(bool add_space);
+  void fill_dictionary_parallel(bool add_space);
+  //void fill_dictionary(bool add_space, int num_threads = 12);
 
   // set char map
   void set_char_map(const std::vector<std::string> &char_list);
